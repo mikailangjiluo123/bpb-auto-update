@@ -52,7 +52,7 @@ jobs:
           unzip -q worker.zip
           rm worker.zip
           echo "${{ env.TARGET_VERSION }}" > version.txt
-          # 保留 bpbversion.txt，删除其他无关文件
+          # 保留 bpbversion.txt 和 version.txt，删除其他旧文件（保留 .git）
           find . -maxdepth 1 ! -name '.' ! -name '.git' ! -name 'bpbversion.txt' ! -name 'version.txt' -exec rm -rf {} + 2>/dev/null || true
 
       - name: 提交并推送（强制覆盖，解决冲突）
