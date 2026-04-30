@@ -13,14 +13,16 @@ on:
         required: false
         default: 'v4.1.2'
 
-permissions:
-  contents: write
+# 强制使用 Node.js 24 环境（通过环境变量）
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   update:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: 初始化仓库（完整克隆）
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -44,22 +46,23 @@ jobs:
             echo "需要更新: $CURRENT -> ${{ env.TARGET_VERSION }}"
           fi
 
-      - name: 下载并解压（若需要）
+      - name: 下载并解压新版本
         if: env.UPDATE_NEEDED == 'true'
         run: |
           URL="https://github.com/bia-pain-bache/BPB-Worker-Panel/releases/download/${{ env.TARGET_VERSION }}/worker.zip"
+          echo "下载地址: $URL"
           curl -L -o worker.zip "$URL"
           unzip -q worker.zip
           rm worker.zip
           echo "${{ env.TARGET_VERSION }}" > version.txt
-          # 保留 bpbversion.txt 和 version.txt，删除其他旧文件（保留 .git）
+          # 清理旧文件但保留 .git 和 bpbversion.txt version.txt
           find . -maxdepth 1 ! -name '.' ! -name '.git' ! -name 'bpbversion.txt' ! -name 'version.txt' -exec rm -rf {} + 2>/dev/null || true
 
-      - name: 提交并推送（强制覆盖，解决冲突）
+      - name: 提交并推送更新（强制覆盖，彻底解决 rejected）
         if: env.UPDATE_NEEDED == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "更新到 ${{ env.TARGET_VERSION }}" || echo "无变更"
+          git commit -m "📦 自动更新到版本 ${{ env.TARGET_VERSION }}" || echo "没有变更"
           git push origin main --force
