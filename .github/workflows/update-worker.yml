@@ -5,8 +5,8 @@ on:
     branches:
       - main
     paths:
-      - 'bpbversion.txt'   # 只有修改这个文件时才触发
-  workflow_dispatch:        # 也支持手动运行，此时可以手动输入版本号（可选）
+      - 'bpbversion.txt'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -25,7 +25,7 @@ jobs:
             echo "错误：仓库中没有 bpbversion.txt 文件！"
             exit 1
           fi
-          TARGET_VERSION=$(cat bpbversion.txt | tr -d '[:space:]')   # 去除空格换行
+          TARGET_VERSION=$(cat bpbversion.txt | tr -d '[:space:]')
           if [ -z "$TARGET_VERSION" ]; then
             echo "错误：bpbversion.txt 内容为空！"
             exit 1
@@ -59,34 +59,27 @@ jobs:
       - name: 根据目标版本号构造下载 URL 并下载
         if: env.UPDATE_NEEDED == 'true'
         run: |
-          # 构造 GitHub Release 下载地址（假定格式规范）
           DOWNLOAD_URL="https://github.com/bia-pain-bache/BPB-Worker-Panel/releases/download/${{ env.TARGET_VERSION }}/worker.zip"
           echo "下载地址: $DOWNLOAD_URL"
           
-          # 测试该 URL 是否有效（可选）
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$DOWNLOAD_URL")
           if [ "$HTTP_CODE" != "200" ]; then
             echo "错误：版本 ${{ env.TARGET_VERSION }} 不存在或 worker.zip 无法下载 (HTTP $HTTP_CODE)"
             exit 1
           fi
           
-          # 下载并解压
-          rm -rf ./*       # 清理旧文件（谨慎：会删除所有非隐藏文件）
+          rm -rf ./*
           wget -O worker.zip "$DOWNLOAD_URL"
           unzip -q worker.zip
           rm worker.zip
           
-          # 写入当前版本标记文件
           echo "${{ env.TARGET_VERSION }}" > version.txt
-          
-          # 注意：这里没有删除 bpbversion.txt，它会被保留
 
-      - name: 提交更改
+      - name: 提交更改（使用强制推送解决冲突）
         if: env.UPDATE_NEEDED == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .
           git commit -m "📦 根据 bpbversion.txt 更新到版本 ${{ env.TARGET_VERSION }}" || echo "没有需要提交的更改"
-          git pull --rebase origin main
-          git push origin main
+          git push origin main --force
