@@ -20,8 +20,7 @@ jobs:
   update:
     runs-on: ubuntu-latest
     steps:
-      - name: 初始化仓库
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -35,7 +34,7 @@ jobs:
           echo "TARGET_VERSION=$VERSION" >> $GITHUB_ENV
           echo "目标版本: $VERSION"
 
-      - name: 检查是否需要更新
+      - name: 检查是否已是最新
         run: |
           CURRENT=$(cat version.txt 2>/dev/null || echo "")
           if [ "$CURRENT" = "${{ env.TARGET_VERSION }}" ]; then
@@ -49,12 +48,11 @@ jobs:
         if: env.UPDATE_NEEDED == 'true'
         run: |
           URL="https://github.com/bia-pain-bache/BPB-Worker-Panel/releases/download/${{ env.TARGET_VERSION }}/worker.zip"
-          echo "下载地址: $URL"
           curl -L -o worker.zip "$URL"
           unzip -q worker.zip
           rm worker.zip
           echo "${{ env.TARGET_VERSION }}" > version.txt
-          # 清理旧文件，保留 .git 和必要的.txt文件
+          # 清理旧文件但保留 .git 和 bpbversion.txt version.txt
           find . -maxdepth 1 ! -name '.' ! -name '.git' ! -name 'bpbversion.txt' ! -name 'version.txt' -exec rm -rf {} + 2>/dev/null || true
 
       - name: 提交并推送更新（使用 PAT 强制推送）
@@ -64,6 +62,5 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .
           git commit -m "📦 更新到版本 ${{ env.TARGET_VERSION }}" || echo "无变更"
-          # 使用 PAT 替换远程 URL
           git remote set-url origin https://x-access-token:${{ secrets.PAT }}@github.com/${{ github.repository }}
           git push origin main --force
