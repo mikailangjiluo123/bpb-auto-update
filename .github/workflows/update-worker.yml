@@ -1,15 +1,12 @@
-name: Auto Update Worker
+name: Update to Version Specified in bpbversion.txt
 
 on:
   push:
     branches:
       - main
-    # 跳过由本 workflow 产生的 commit
-    paths-ignore:
-      - 'version.txt'
-  schedule:
-    - cron: "0 1 * * *"
-  workflow_dispatch:
+    paths:
+      - 'bpbversion.txt'   # 只有修改这个文件时才触发
+  workflow_dispatch:        # 也支持手动运行，此时可以手动输入版本号（可选）
 
 permissions:
   contents: write
@@ -17,82 +14,77 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
-    # 避免循环：如果本次 push 是 bot 产生的，则不再运行
-    if: github.event_name != 'push' || github.actor != 'github-actions[bot]'
     steps:
       - name: 初始化仓库
         uses: actions/checkout@v4
 
-      - name: 获取当前本地版本
-        id: local_version
+      - name: 读取 bpbversion.txt 中的目标版本号
+        id: read_target
         run: |
-          if [ -f version.txt ]; then
-            LOCAL_VERSION=$(cat version.txt)
-            echo "当前本地版本: $LOCAL_VERSION"
-          else
-            LOCAL_VERSION=""
-            echo "首次同步，没有本地版本"
-          fi
-          echo "LOCAL_VERSION=$LOCAL_VERSION" >> $GITHUB_ENV
-
-      - name: 获取最新 Release 信息
-        id: get_release
-        run: |
-          API_URL="https://api.github.com/repos/bia-pain-bache/BPB-Worker-Panel/releases"
-          # 取第一个非预发布版本（如果希望包含预发布，可调整 jq 条件）
-          RESPONSE=$(curl -s "$API_URL")
-          LATEST_RELEASE=$(echo "$RESPONSE" | jq -r '.[0]')
-          TAG_NAME=$(echo "$LATEST_RELEASE" | jq -r '.tag_name')
-          DOWNLOAD_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name == "worker.zip") | .browser_download_url')
-          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
-            echo "未找到 worker.zip，退出！"
+          if [ ! -f bpbversion.txt ]; then
+            echo "错误：仓库中没有 bpbversion.txt 文件！"
             exit 1
           fi
-          echo "最新版本号: $TAG_NAME"
-          echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
-          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
+          TARGET_VERSION=$(cat bpbversion.txt | tr -d '[:space:]')   # 去除空格换行
+          if [ -z "$TARGET_VERSION" ]; then
+            echo "错误：bpbversion.txt 内容为空！"
+            exit 1
+          fi
+          echo "目标版本: $TARGET_VERSION"
+          echo "TARGET_VERSION=$TARGET_VERSION" >> $GITHUB_ENV
+
+      - name: 获取当前本地版本（如果有）
+        id: current_version
+        run: |
+          if [ -f version.txt ]; then
+            CURRENT_VERSION=$(cat version.txt)
+            echo "当前版本: $CURRENT_VERSION"
+          else
+            CURRENT_VERSION=""
+            echo "未找到 version.txt，可能是首次部署"
+          fi
+          echo "CURRENT_VERSION=$CURRENT_VERSION" >> $GITHUB_ENV
 
       - name: 判断是否需要更新
-        if: env.LOCAL_VERSION != env.TAG_NAME
+        id: need_update
         run: |
-          echo "发现新版本 (${{ env.LOCAL_VERSION }} -> ${{ env.TAG_NAME }})，开始同步"
-          echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
-
-      - name: 清理并准备新文件（保留重要目录）
-        if: env.UPDATE_NEEDED == 'true'
-        run: |
-          # 下载到临时目录
-          mkdir -p /tmp/worker_update
-          cd /tmp/worker_update
-          wget -q "${{ env.DOWNLOAD_URL }}" -O worker.zip
-          unzip -q worker.zip
-          rm worker.zip
-
-          # 处理可能的嵌套文件夹（如果 zip 内只有一个目录且包含 worker 文件，则提升该目录内容）
-          if [ $(ls -1 | wc -l) -eq 1 ] && [ -d */ ]; then
-            SUBDIR=$(ls -d */)
-            echo "检测到嵌套目录 $SUBDIR，将其内容上移"
-            mv $SUBDIR/* ./
-            rmdir $SUBDIR
+          if [ "${{ env.CURRENT_VERSION }}" = "${{ env.TARGET_VERSION }}" ]; then
+            echo "当前已经是目标版本 ${{ env.TARGET_VERSION }}，无需更新"
+            echo "UPDATE_NEEDED=false" >> $GITHUB_ENV
+          else
+            echo "需要更新：${{ env.CURRENT_VERSION }} -> ${{ env.TARGET_VERSION }}"
+            echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
           fi
 
-          # 回到仓库根目录，删除旧文件（但保留 .git, .github, version.txt）
-          cd "$GITHUB_WORKSPACE"
-          # 删除所有非隐藏文件/目录，但保留 version.txt 和 .github, .git
-          find . -maxdepth 1 ! -name '.' ! -name '.git' ! -name '.github' ! -name 'version.txt' -exec rm -rf {} + 2>/dev/null || true
-
-          # 同步新文件（复制临时目录内容到仓库根目录）
-          cp -r /tmp/worker_update/* ./
-          # 写入新版本号
-          echo "${{ env.TAG_NAME }}" > version.txt
-
-          # 清理临时目录
-          rm -rf /tmp/worker_update
+      - name: 根据目标版本号构造下载 URL 并下载
+        if: env.UPDATE_NEEDED == 'true'
+        run: |
+          # 构造 GitHub Release 下载地址（假定格式规范）
+          DOWNLOAD_URL="https://github.com/bia-pain-bache/BPB-Worker-Panel/releases/download/${{ env.TARGET_VERSION }}/worker.zip"
+          echo "下载地址: $DOWNLOAD_URL"
+          
+          # 测试该 URL 是否有效（可选）
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$DOWNLOAD_URL")
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "错误：版本 ${{ env.TARGET_VERSION }} 不存在或 worker.zip 无法下载 (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+          
+          # 下载并解压
+          rm -rf ./*       # 清理旧文件（谨慎：会删除所有非隐藏文件）
+          wget -O worker.zip "$DOWNLOAD_URL"
+          unzip -q worker.zip
+          rm worker.zip
+          
+          # 写入当前版本标记文件
+          echo "${{ env.TARGET_VERSION }}" > version.txt
+          
+          # 注意：这里没有删除 bpbversion.txt，它会被保留
 
       - name: 提交更改
         if: env.UPDATE_NEEDED == 'true'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "🔄 自动同步最新 Worker 版本：${{ env.TAG_NAME }}"
+          commit_message: "📦 根据 bpbversion.txt 更新到版本 ${{ env.TARGET_VERSION }}"
           commit_author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
-          # 移除 force push，使用普通推送
+          # 移除 force push，避免覆盖他人提交
