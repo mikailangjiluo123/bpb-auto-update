@@ -1,92 +1,98 @@
-name: Sync BPB Panel (Pages Version)
+name: Auto Update Worker
 
 on:
-  workflow_dispatch:          # 手动运行
-  schedule:
-    - cron: "0 0 * * *"      # 每天 UTC 00:00 自动运行
   push:
     branches:
       - main
+    # 跳过由本 workflow 产生的 commit
+    paths-ignore:
+      - 'version.txt'
+  schedule:
+    - cron: "0 1 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: write
-  issues: write
 
 jobs:
-  sync:
+  update:
     runs-on: ubuntu-latest
+    # 避免循环：如果本次 push 是 bot 产生的，则不再运行
+    if: github.event_name != 'push' || github.actor != 'github-actions[bot]'
     steps:
-      - name: 检出仓库
+      - name: 初始化仓库
         uses: actions/checkout@v4
 
-      - name: 获取上游最新代码
+      - name: 获取当前本地版本
+        id: local_version
         run: |
-          # 添加上游仓库
-          git remote add upstream https://github.com/bia-pain-bache/BPB-Worker-Panel.git
-          git fetch upstream
-
-      - name: 检查是否需要更新
-        id: check_update
-        run: |
-          # 获取当前版本（从 version.txt 或文件修改时间判断）
           if [ -f version.txt ]; then
             LOCAL_VERSION=$(cat version.txt)
             echo "当前本地版本: $LOCAL_VERSION"
           else
-            LOCAL_VERSION="none"
-            echo "首次同步，无本地版本"
+            LOCAL_VERSION=""
+            echo "首次同步，没有本地版本"
           fi
+          echo "LOCAL_VERSION=$LOCAL_VERSION" >> $GITHUB_ENV
 
-          # 获取上游最新 commit hash
-          UPSTREAM_HASH=$(git rev-parse upstream/main)
-          LOCAL_HASH=$(git rev-parse HEAD)
-          
-          echo "UPSTREAM_HASH=$UPSTREAM_HASH" >> $GITHUB_ENV
-          echo "LOCAL_HASH=$LOCAL_HASH" >> $GITHUB_ENV
-          
-          if [ "$UPSTREAM_HASH" = "$LOCAL_HASH" ]; then
-            echo "已经是最新版本，无需更新"
-            echo "UPDATE_NEEDED=false" >> $GITHUB_ENV
-          else
-            echo "发现上游更新，需要同步"
-            echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
-          fi
-
-      - name: 同步上游代码
-        if: env.UPDATE_NEEDED == 'true'
+      - name: 获取最新 Release 信息
+        id: get_release
         run: |
-          # 合并上游 main 分支
-          git merge upstream/main --allow-unrelated-histories -m "chore: 同步 BPB Panel 上游更新" || true
-          
-          # 确保 _worker.js 存在（Pages 部署需要）
-          if [ ! -f _worker.js ]; then
-            echo "错误：未找到 _worker.js 文件"
+          API_URL="https://api.github.com/repos/bia-pain-bache/BPB-Worker-Panel/releases"
+          # 取第一个非预发布版本（如果希望包含预发布，可调整 jq 条件）
+          RESPONSE=$(curl -s "$API_URL")
+          LATEST_RELEASE=$(echo "$RESPONSE" | jq -r '.[0]')
+          TAG_NAME=$(echo "$LATEST_RELEASE" | jq -r '.tag_name')
+          DOWNLOAD_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name == "worker.zip") | .browser_download_url')
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+            echo "未找到 worker.zip，退出！"
             exit 1
           fi
-          
-          # 记录版本信息
-          VERSION=$(git log -1 --format=%cd --date=short)
-          echo "$VERSION" > version.txt
-          echo "同步完成，版本: $VERSION"
+          echo "最新版本号: $TAG_NAME"
+          echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
 
-      - name: 提交并推送更新
+      - name: 判断是否需要更新
+        if: env.LOCAL_VERSION != env.TAG_NAME
+        run: |
+          echo "发现新版本 (${{ env.LOCAL_VERSION }} -> ${{ env.TAG_NAME }})，开始同步"
+          echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
+
+      - name: 清理并准备新文件（保留重要目录）
         if: env.UPDATE_NEEDED == 'true'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          git diff --staged --quiet || git commit -m "chore: 自动同步 BPB Panel Pages 分支"
-          git push origin main
+          # 下载到临时目录
+          mkdir -p /tmp/worker_update
+          cd /tmp/worker_update
+          wget -q "${{ env.DOWNLOAD_URL }}" -O worker.zip
+          unzip -q worker.zip
+          rm worker.zip
 
-      - name: 创建通知 Issue
+          # 处理可能的嵌套文件夹（如果 zip 内只有一个目录且包含 worker 文件，则提升该目录内容）
+          if [ $(ls -1 | wc -l) -eq 1 ] && [ -d */ ]; then
+            SUBDIR=$(ls -d */)
+            echo "检测到嵌套目录 $SUBDIR，将其内容上移"
+            mv $SUBDIR/* ./
+            rmdir $SUBDIR
+          fi
+
+          # 回到仓库根目录，删除旧文件（但保留 .git, .github, version.txt）
+          cd "$GITHUB_WORKSPACE"
+          # 删除所有非隐藏文件/目录，但保留 version.txt 和 .github, .git
+          find . -maxdepth 1 ! -name '.' ! -name '.git' ! -name '.github' ! -name 'version.txt' -exec rm -rf {} + 2>/dev/null || true
+
+          # 同步新文件（复制临时目录内容到仓库根目录）
+          cp -r /tmp/worker_update/* ./
+          # 写入新版本号
+          echo "${{ env.TAG_NAME }}" > version.txt
+
+          # 清理临时目录
+          rm -rf /tmp/worker_update
+
+      - name: 提交更改
         if: env.UPDATE_NEEDED == 'true'
-        uses: actions/github-script@v7
+        uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          script: |
-            const today = new Date().toLocaleDateString('zh-CN');
-            github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `🔄 BPB Panel 已自动同步 (${today})`,
-              body: `BPB Worker Panel 已成功同步到最新代码。\n\n如需重新部署，请前往 Cloudflare Pages 点击 **重试部署**。\n\n> 此 Issue 由 GitHub Actions 自动创建。`
-            });
+          commit_message: "🔄 自动同步最新 Worker 版本：${{ env.TAG_NAME }}"
+          commit_author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
+          # 移除 force push，使用普通推送
