@@ -83,8 +83,10 @@ jobs:
 
       - name: 提交更改
         if: env.UPDATE_NEEDED == 'true'
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "📦 根据 bpbversion.txt 更新到版本 ${{ env.TARGET_VERSION }}"
-          commit_author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
-          # 移除 force push，避免覆盖他人提交
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "📦 根据 bpbversion.txt 更新到版本 ${{ env.TARGET_VERSION }}" || echo "没有需要提交的更改"
+          git pull --rebase origin main
+          git push origin main
