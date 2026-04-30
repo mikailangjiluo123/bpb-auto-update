@@ -5,11 +5,11 @@ on:
     branches:
       - main
     paths:
-      - 'bpbversion.txt'          # 修改此文件自动触发
-  workflow_dispatch:               # 也支持手动触发，可输入版本号
+      - 'bpbversion.txt'
+  workflow_dispatch:
     inputs:
       version:
-        description: '目标版本号（例如 v4.1.2）'
+        description: '目标版本号 (例如 v4.1.2)'
         required: false
         default: 'v4.1.2'
 
@@ -20,106 +20,46 @@ jobs:
   update:
     runs-on: ubuntu-latest
     steps:
-      - name: 初始化仓库（完整克隆，避免历史缺失）
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 0            # 拉取全部历史，便于解决冲突
+          fetch-depth: 0
 
       - name: 获取目标版本号
-        id: target
         run: |
-          # 优先使用手动输入的版本号，否则读取 bpbversion.txt
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; then
-            TARGET_VERSION="${{ github.event.inputs.version }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
           else
-            if [ ! -f bpbversion.txt ]; then
-              echo "错误：仓库中没有 bpbversion.txt 文件！"
-              exit 1
-            fi
-            TARGET_VERSION=$(cat bpbversion.txt | tr -d '[:space:]')
+            VERSION=$(cat bpbversion.txt | tr -d '[:space:]')
           fi
+          echo "TARGET_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "目标版本: $VERSION"
 
-          if [ -z "$TARGET_VERSION" ]; then
-            echo "错误：版本号为空！"
-            exit 1
-          fi
-          echo "目标版本: $TARGET_VERSION"
-          echo "TARGET_VERSION=$TARGET_VERSION" >> $GITHUB_ENV
-
-      - name: 获取当前本地版本
-        id: current
+      - name: 检查是否已是最新
         run: |
-          if [ -f version.txt ]; then
-            CURRENT_VERSION=$(cat version.txt)
-            echo "当前版本: $CURRENT_VERSION"
-          else
-            CURRENT_VERSION=""
-            echo "未找到 version.txt，可能是首次部署"
-          fi
-          echo "CURRENT_VERSION=$CURRENT_VERSION" >> $GITHUB_ENV
-
-      - name: 判断是否需要更新
-        id: need
-        run: |
-          if [ "${{ env.CURRENT_VERSION }}" == "${{ env.TARGET_VERSION }}" ]; then
-            echo "当前已是最新，无需更新"
+          CURRENT=$(cat version.txt 2>/dev/null || echo "")
+          if [ "$CURRENT" = "${{ env.TARGET_VERSION }}" ]; then
             echo "UPDATE_NEEDED=false" >> $GITHUB_ENV
           else
-            echo "需要更新：${{ env.CURRENT_VERSION }} -> ${{ env.TARGET_VERSION }}"
             echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
+            echo "需要更新: $CURRENT -> ${{ env.TARGET_VERSION }}"
           fi
 
-      - name: 下载并解压目标版本
+      - name: 下载并解压（若需要）
         if: env.UPDATE_NEEDED == 'true'
         run: |
-          DOWNLOAD_URL="https://github.com/bia-pain-bache/BPB-Worker-Panel/releases/download/${{ env.TARGET_VERSION }}/worker.zip"
-          echo "下载地址: $DOWNLOAD_URL"
-
-          # 检查 URL 是否有效
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$DOWNLOAD_URL")
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "错误：版本 ${{ env.TARGET_VERSION }} 不存在或 worker.zip 无法下载 (HTTP $HTTP_CODE)"
-            exit 1
-          fi
-
-          # 清理旧文件（保留 .git 目录）
-          find . -maxdepth 1 ! -name '.' ! -name '.git' -exec rm -rf {} + 2>/dev/null || true
-
-          # 下载并解压新文件
-          wget -O worker.zip "$DOWNLOAD_URL"
+          URL="https://github.com/bia-pain-bache/BPB-Worker-Panel/releases/download/${{ env.TARGET_VERSION }}/worker.zip"
+          curl -L -o worker.zip "$URL"
           unzip -q worker.zip
           rm worker.zip
-
-          # 写入版本标记
           echo "${{ env.TARGET_VERSION }}" > version.txt
+          # 保留 bpbversion.txt，删除其他无关文件
+          find . -maxdepth 1 ! -name '.' ! -name '.git' ! -name 'bpbversion.txt' ! -name 'version.txt' -exec rm -rf {} + 2>/dev/null || true
 
-      - name: 提交并推送更新（自动解决冲突）
+      - name: 提交并推送（强制覆盖，解决冲突）
         if: env.UPDATE_NEEDED == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # 添加所有变更
           git add .
-
-          # 如果有变更则提交，否则跳过
-          if git diff --cached --quiet; then
-            echo "没有需要提交的更改"
-            exit 0
-          fi
-
-          git commit -m "📦 根据 bpbversion.txt 更新到版本 ${{ env.TARGET_VERSION }}"
-
-          # 尝试拉取远程最新代码并合并（避免非快进错误）
-          # 如果远程有更新，使用 merge 方式合并（--no-rebase 避免变基复杂）
-          git pull origin main --no-rebase || true
-
-          # 尝试推送，如果仍然失败（例如分支保护），则输出提示
-          if git push origin main; then
-            echo "推送成功"
-          else
-            echo "推送失败，可能是分支保护规则阻止了直接推送"
-            echo "请检查仓库设置：Settings -> Branches -> Branch protection rules"
-            echo "临时解决方法：在保护规则中允许 'github-actions[bot]' 强制推送，或使用个人访问令牌"
-            exit 1
-          fi
+          git commit -m "更新到 ${{ env.TARGET_VERSION }}" || echo "无变更"
+          git push origin main --force
